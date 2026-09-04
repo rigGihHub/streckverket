@@ -37,3 +37,12 @@ def test_one_click_can_run_without_optional_keys(monkeypatch):
     assert len(out.coupon)==13
     assert len(out.cards)==13
     assert [s.name for s in out.stages][:4] == ["Kupong","The Odds API","football-data.org","API-Football"]
+
+
+def test_one_click_records_match_level_provenance_without_optional_keys():
+    out = run_one_click(OneClickConfig(), coupon=get_demo_matches(), fetch_coupon=False)
+    assert len(out.match_provenance) == 13 * 4
+    per_match = [p for p in out.match_provenance if p.match_number == 1]
+    assert {p.source for p in per_match} == {"Kupong", "The Odds API", "football-data.org", "API-Football fixture"}
+    assert next(p for p in per_match if p.source == "Kupong").matched_units == 1
+    assert next(p for p in per_match if p.source == "The Odds API").matched_units == 0

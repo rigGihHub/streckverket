@@ -101,6 +101,7 @@ class MatchInput:
     model: Tuple[float,float,float]
     kickoff: str | None = None
     competition: str = ""
+    market_available: bool = True
 
     @property
     def market(self):

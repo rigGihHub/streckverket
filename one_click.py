@@ -17,6 +17,7 @@ from pipeline import ProviderOutput, run_match_pipeline
 from evidence import make_signal
 from match_intelligence import IntelligenceClaim, resolve_claim
 from source_consensus import DEFAULT_SOURCES, Observation
+from api_cache import CachePolicy, CacheStats, cached_call, cache_stats, stats_delta
 
 
 def _now() -> str:
@@ -114,6 +115,17 @@ class OneClickStage:
     attempted: int = 0
 
 
+@dataclass(frozen=True)
+class MatchSourceProvenance:
+    match_number: int
+    competition: str
+    source: str
+    matched_units: int
+    attempted_units: int
+    status: str = ""
+    reason_code: str = ""
+
+
 @dataclass
 class OneClickResult:
     coupon: list[MatchInput]
@@ -122,6 +134,8 @@ class OneClickResult:
     stages: list[OneClickStage] = field(default_factory=list)
     fixture_matches: dict[int,FixtureMatch] = field(default_factory=dict)
     discovery: list[dict] = field(default_factory=list)
+    api_stats: CacheStats = field(default_factory=lambda: CacheStats(0, 0, 0))
+    match_provenance: list[MatchSourceProvenance] = field(default_factory=list)
 
     @property
     def ready_count(self) -> int:
@@ -172,6 +186,18 @@ def _lineup_provider(payload: dict):
 
 def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None=None, fetch_coupon: bool=True) -> OneClickResult:
     stages=[]
+    match_provenance=[]
+    stats_before = cache_stats()
+
+    # TTLs are intentionally conservative. Stable metadata can live longer;
+    # odds/fixtures/lineups are short-lived so the cache cannot create false freshness.
+    odds_policy = CachePolicy("odds", 120)
+    competitions_policy = CachePolicy("competitions", 24*3600)
+    catalog_policy = CachePolicy("team_catalog", 12*3600)
+    form_policy = CachePolicy("venue_form", 4*3600)
+    fixtures_policy = CachePolicy("fixtures", 120)
+    injuries_policy = CachePolicy("injuries", 300)
+    lineups_policy = CachePolicy("lineups", 90)
     if fetch_coupon:
         fetched,status=fetch_svenskaspel_current()
         if not status.ok or not fetched:
@@ -181,9 +207,16 @@ def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None
         if not coupon or len(coupon)!=13: raise ValueError("Exakt 13 matcher krävs när kupongen inte hämtas automatiskt")
         current=list(coupon); stages.append(OneClickStage("Kupong",True,"Befintlig kupong används",13,13))
 
+    _coupon_source = "Svenska Spel" if fetch_coupon else "Kupong"
+    for m in current:
+        match_provenance.append(MatchSourceProvenance(
+            m.number, str(getattr(m, "competition", "") or "Okänd tävling"),
+            _coupon_source, 1, 1, "Kupongmatch tillgänglig", "matched"
+        ))
+
     # Odds: independent of other sources. If unavailable, Svenska Spels odds remain as base.
     if config.odds_api_key.strip():
-        events,status=fetch_the_odds_api(config.odds_api_key,config.odds_sport_keys,config.odds_regions)
+        events,status=cached_call(odds_policy, (config.odds_api_key, config.odds_sport_keys, config.odds_regions), lambda: fetch_the_odds_api(config.odds_api_key,config.odds_sport_keys,config.odds_regions))
         matched=match_odds_to_coupon(current,events) if status.ok else {}
         if status.ok:
             updated=[]
@@ -197,32 +230,76 @@ def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None
     else:
         stages.append(OneClickStage("The Odds API",False,"API-nyckel saknas – Svenska Spels odds används",0,13))
 
+    for m in current:
+        match_provenance.append(MatchSourceProvenance(
+            m.number, str(getattr(m, "competition", "") or "Okänd tävling"),
+            "The Odds API", 1 if (config.odds_api_key.strip() and m.number in (matched if 'matched' in locals() else {})) else 0, 1,
+            "Matchad" if (config.odds_api_key.strip() and m.number in (matched if 'matched' in locals() else {})) else ("API-nyckel saknas" if not config.odds_api_key.strip() else ("API-fel" if not status.ok else "Ingen säker matchning")),
+            "matched" if (config.odds_api_key.strip() and m.number in (matched if 'matched' in locals() else {})) else ("api_key_missing" if not config.odds_api_key.strip() else ("api_error" if not status.ok else "no_secure_match"))
+        ))
+
     discovery=[]; form_by_match={}
+    _football_data_error = ""
     if config.football_data_key.strip():
         try:
-            comps=fetch_competitions(config.football_data_key)
+            comps=cached_call(competitions_policy, config.football_data_key, lambda: fetch_competitions(config.football_data_key))
             comps=sorted(comps,key=lambda c:(0 if c.country=="England" else 1,c.country,c.name))[:config.max_competitions]
-            candidates,team_comp,errors=build_catalog(config.football_data_key,comps)
+            candidates,team_comp,errors=cached_call(catalog_policy, (config.football_data_key, tuple((c.id,c.name,c.country) for c in comps)), lambda: build_catalog(config.football_data_key,comps))
             discovery=discover_coupon(current,candidates,team_comp)
             matched_teams=0
             for row in discovery:
                 h=row["home"]; a=row["away"]
                 if h.match.confidence=="Hög" and a.match.confidence=="Hög" and h.match.candidate and a.match.candidate:
                     matched_teams += 2
-                    hm,_=fetch_team_finished_matches(config.football_data_key,h.match.candidate.team_id,"HOME",config.form_matches)
-                    am,_=fetch_team_finished_matches(config.football_data_key,a.match.candidate.team_id,"AWAY",config.form_matches)
+                    hm,_=cached_call(form_policy, (config.football_data_key,h.match.candidate.team_id,"HOME",config.form_matches), lambda: fetch_team_finished_matches(config.football_data_key,h.match.candidate.team_id,"HOME",config.form_matches))
+                    am,_=cached_call(form_policy, (config.football_data_key,a.match.candidate.team_id,"AWAY",config.form_matches), lambda: fetch_team_finished_matches(config.football_data_key,a.match.candidate.team_id,"AWAY",config.form_matches))
                     form_by_match[row["match_number"]]=(summarize_team_form(hm,h.match.candidate.team_id), summarize_team_form(am,a.match.candidate.team_id))
             stages.append(OneClickStage("football-data.org",True,f"Lagmatchning/form klar; {len(errors)} tävlingsfel isolerades",matched_teams,26))
         except Exception as exc:
-            stages.append(OneClickStage("football-data.org",False,f"{type(exc).__name__}: {exc}",0,26))
+            _football_data_error = f"{type(exc).__name__}: {exc}"
+            stages.append(OneClickStage("football-data.org",False,_football_data_error,0,26))
     else:
         stages.append(OneClickStage("football-data.org",False,"API-nyckel saknas",0,26))
 
+    _discovery_by_match = {int(row.get("match_number")): row for row in discovery if row.get("match_number") is not None}
+    for m in current:
+        row = _discovery_by_match.get(m.number)
+        matched_teams = 0
+        if row:
+            for side in ("home", "away"):
+                side_row = row.get(side)
+                mt = getattr(side_row, "match", None)
+                if mt and getattr(mt, "confidence", "") == "Hög" and getattr(mt, "candidate", None):
+                    matched_teams += 1
+        if matched_teams == 2:
+            fd_status, fd_reason = "Båda lag matchade", "matched"
+        elif not config.football_data_key.strip():
+            fd_status, fd_reason = "API-nyckel saknas", "api_key_missing"
+        elif _football_data_error:
+            fd_status, fd_reason = f"API-fel: {_football_data_error}", "api_error"
+        elif not row:
+            fd_status, fd_reason = "Ingen lagkatalog/matchningsrad för matchen", "no_candidates"
+        else:
+            confidences=[]
+            for side in ("home", "away"):
+                side_row=row.get(side)
+                mt=getattr(side_row, "match", None)
+                confidences.append(str(getattr(mt, "confidence", "Ingen") or "Ingen"))
+            if "Granska" in confidences:
+                fd_status, fd_reason = f"{matched_teams}/2 lag säkert matchade; minst ett lag är tvetydigt", "ambiguous_team_match"
+            else:
+                fd_status, fd_reason = f"{matched_teams}/2 lag säkert matchade; för låg matchsannolikhet", "low_confidence_team_match"
+        match_provenance.append(MatchSourceProvenance(
+            m.number, str(getattr(m, "competition", "") or "Okänd tävling"),
+            "football-data.org", matched_teams, 2, fd_status, fd_reason
+        ))
+
     fixture_matches={}; injury_payloads={}; lineup_payloads={}
+    _api_football_error = ""
     if config.api_football_key.strip():
         try:
             dates=sorted({d for d in (parse_coupon_date(m.kickoff) for m in current) if d})
-            date_payloads={d:fetch_api_football_fixtures_by_date(config.api_football_key,d) for d in dates}
+            date_payloads={d:cached_call(fixtures_policy, (config.api_football_key,d), lambda d=d: fetch_api_football_fixtures_by_date(config.api_football_key,d)) for d in dates}
             high_count=0
             for m in current:
                 d=parse_coupon_date(m.kickoff)
@@ -230,15 +307,36 @@ def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None
                 fm=match_api_football_fixture(m,date_payloads.get(d,{})); fixture_matches[m.number]=fm
                 if fm.confidence=="Hög" and fm.fixture_id:
                     high_count += 1
-                    try: injury_payloads[m.number]=fetch_api_football_injuries(config.api_football_key,fm.fixture_id)
+                    try: injury_payloads[m.number]=cached_call(injuries_policy, (config.api_football_key,fm.fixture_id), lambda fm=fm: fetch_api_football_injuries(config.api_football_key,fm.fixture_id))
                     except Exception: injury_payloads[m.number]={"response":[]}
-                    try: lineup_payloads[m.number]=fetch_api_football_lineups(config.api_football_key,fm.fixture_id)
+                    try: lineup_payloads[m.number]=cached_call(lineups_policy, (config.api_football_key,fm.fixture_id), lambda fm=fm: fetch_api_football_lineups(config.api_football_key,fm.fixture_id))
                     except Exception: lineup_payloads[m.number]={"response":[]}
             stages.append(OneClickStage("API-Football",True,"Fixture-matchning + frånvaro/lineup försökt för säkra träffar",high_count,13))
         except Exception as exc:
-            stages.append(OneClickStage("API-Football",False,f"{type(exc).__name__}: {exc}",0,13))
+            _api_football_error = f"{type(exc).__name__}: {exc}"
+            stages.append(OneClickStage("API-Football",False,_api_football_error,0,13))
     else:
         stages.append(OneClickStage("API-Football",False,"API-nyckel saknas",0,13))
+
+    for m in current:
+        fm = fixture_matches.get(m.number)
+        matched_fixture = 1 if (fm and fm.confidence == "Hög" and fm.fixture_id) else 0
+        if not config.api_football_key.strip():
+            status, reason_code = "API-nyckel saknas", "api_key_missing"
+        elif not parse_coupon_date(m.kickoff):
+            status, reason_code = "Matchdatum saknas", "missing_match_date"
+        elif _api_football_error:
+            status, reason_code = f"API-fel: {_api_football_error}", "api_error"
+        elif matched_fixture:
+            status, reason_code = "Fixture säkert matchad", "matched"
+        elif fm and fm.confidence == "Granska":
+            status, reason_code = "Fixture-matchning är tvetydig och kräver granskning", "ambiguous_fixture_match"
+        else:
+            status, reason_code = "Ingen säker fixture-matchning", "no_secure_match"
+        match_provenance.append(MatchSourceProvenance(
+            m.number, str(getattr(m, "competition", "") or "Okänd tävling"),
+            "API-Football fixture", matched_fixture, 1, status, reason_code
+        ))
 
     cards=[]; enriched=[]
     for m in current:
@@ -252,4 +350,4 @@ def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None
         result=run_match_pipeline(m,providers,max_total_shift=0.14)
         cards.append(result.card); enriched.append(result.enriched_match)
 
-    return OneClickResult(current,enriched,cards,stages,fixture_matches,discovery)
+    return OneClickResult(current,enriched,cards,stages,fixture_matches,discovery,stats_delta(stats_before, cache_stats()),match_provenance)

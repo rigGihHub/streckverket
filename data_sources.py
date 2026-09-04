@@ -196,7 +196,7 @@ def parse_svenskaspel_api_payload(payload: Any) -> List[MatchInput]:
         else:
             model = public
             safe_odds = (3.0, 3.0, 3.0)
-        matches.append(MatchInput(i, pair[0], pair[1], safe_odds, public, model, kickoff=_extract_event_kickoff(event), competition=_extract_event_competition(event)))
+        matches.append(MatchInput(i, pair[0], pair[1], safe_odds, public, model, kickoff=_extract_event_kickoff(event), competition=_extract_event_competition(event), market_available=bool(odds)))
     return matches
 
 
@@ -408,6 +408,7 @@ def parse_coupon_csv(df) -> List[MatchInput]:
             odds=odds,
             public=public,
             model=model,
+            market_available=has_odds,
         ))
     if len(out) != 13:
         raise DataSourceError(f"En Stryktipskupong måste innehålla 13 matcher; filen innehåller {len(out)}.")

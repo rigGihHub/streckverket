@@ -50,6 +50,7 @@ class ForumPost:
     comments: int
     source: str
     url: str = ""
+    author: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,42 @@ class ForumRadar:
     transfer_mentions: int
     alert_terms: tuple[str, ...]
     source: str
+
+
+@dataclass(frozen=True)
+class SupporterPulse:
+    posts: int
+    unique_authors: int
+    confidence: float
+    resignation: float
+    worry: float
+    optimism: float
+    anger: float
+    consensus: float
+    tone_delta: float | None
+    source: str
+
+    @property
+    def sample_quality(self) -> float:
+        volume = min(1.0, self.posts / 40.0)
+        diversity = min(1.0, self.unique_authors / 20.0) if self.unique_authors else 0.0
+        return max(0.0, min(1.0, 0.55 * volume + 0.45 * diversity))
+
+    @property
+    def label(self) -> str:
+        if self.posts < 5:
+            return "För lite underlag"
+        if self.resignation >= 0.55:
+            return "Uppgiven"
+        if self.confidence >= 0.60 and self.optimism >= 0.45:
+            return "Självsäker"
+        if self.worry >= 0.55:
+            return "Orolig"
+        if self.anger >= 0.55:
+            return "Arg/missnöjd"
+        if self.optimism >= 0.45:
+            return "Försiktigt optimistisk"
+        return "Blandad ton"
 
 
 NEGATIVE = {
@@ -172,10 +209,86 @@ def fetch_reddit_subreddit_search(subreddit: str, query: str, *, limit: int = 25
             title=str(d.get("title") or ""), body=str(d.get("selftext") or ""),
             created_utc=float(d.get("created_utc") or 0), score=int(d.get("score") or 0),
             comments=int(d.get("num_comments") or 0), source=f"Reddit r/{subreddit}",
-            url="https://www.reddit.com"+str(d.get("permalink") or ""),
+            url="https://www.reddit.com"+str(d.get("permalink") or ""), author=str(d.get("author") or ""),
         ))
     return out
 
+
+
+CONFIDENCE_TERMS = {
+    "confident", "easy", "win", "winning", "sure", "certain", "comfortable", "dominate",
+    "säker", "vinner", "vinst", "enkelt", "komfortabel", "dominerar", "självsäker",
+}
+RESIGNATION_TERMS = {
+    "hopeless", "no chance", "finished", "done", "give up", "season over", "we're cooked",
+    "ingen chans", "kört", "uppgiven", "säsongen är över", "ger upp", "hopplöst",
+}
+WORRY_TERMS = {
+    "worried", "worry", "nervous", "concerned", "fear", "afraid", "problem", "weak",
+    "orolig", "oro", "nervös", "bekymrad", "rädd", "problem", "svag",
+}
+ANGER_TERMS = {
+    "furious", "angry", "disgrace", "embarrassing", "pathetic", "fraud", "sack",
+    "rasande", "arg", "skandal", "pinsamt", "patetiskt", "sparka",
+}
+OPTIMISM_TERMS = {
+    "hope", "positive", "good feeling", "believe", "excited", "promising", "strong",
+    "hopp", "positiv", "bra känsla", "tror", "taggad", "lovande", "stark",
+}
+
+def _phrase_score(text: str, terms: set[str]) -> int:
+    t = text.lower()
+    return sum(1 for term in terms if term in t)
+
+def analyze_supporter_pulse(posts: Iterable[ForumPost], *, baseline_tone: float | None = None) -> SupporterPulse:
+    rows = list(posts)
+    if not rows:
+        return SupporterPulse(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None, "Forum")
+    source = rows[0].source
+    authors = {p.author.strip().lower() for p in rows if p.author.strip() and p.author.strip().lower() not in {"[deleted]", "deleted"}}
+    totals = {"confidence": 0.0, "resignation": 0.0, "worry": 0.0, "optimism": 0.0, "anger": 0.0}
+    per_post_signs=[]
+    total_weight=0.0
+    for p in rows:
+        text=f"{p.title} {p.body}".lower()
+        weight=min(3.0, 1.0 + math.log1p(max(0,p.score)+max(0,p.comments))/4.0)
+        total_weight += weight
+        local={
+            "confidence": _phrase_score(text, CONFIDENCE_TERMS),
+            "resignation": _phrase_score(text, RESIGNATION_TERMS),
+            "worry": _phrase_score(text, WORRY_TERMS),
+            "optimism": _phrase_score(text, OPTIMISM_TERMS),
+            "anger": _phrase_score(text, ANGER_TERMS),
+        }
+        for k,v in local.items(): totals[k] += weight * min(2, v)
+        pos = local["confidence"] + local["optimism"]
+        neg = local["resignation"] + local["worry"] + local["anger"]
+        per_post_signs.append(1 if pos > neg else (-1 if neg > pos else 0))
+    denom=max(1.0,total_weight)
+    norm=lambda x: max(0.0,min(1.0,x/denom))
+    confidence=norm(totals["confidence"]); resignation=norm(totals["resignation"]); worry=norm(totals["worry"]); optimism=norm(totals["optimism"]); anger=norm(totals["anger"])
+    non_neutral=[x for x in per_post_signs if x]
+    consensus=0.0
+    if non_neutral:
+        consensus=abs(sum(non_neutral))/len(non_neutral)
+    current_tone=max(-1.0,min(1.0,(confidence+optimism-resignation-worry-anger)/2.0))
+    tone_delta=None if baseline_tone is None else max(-2.0,min(2.0,current_tone-float(baseline_tone)))
+    return SupporterPulse(len(rows), len(authors), confidence, resignation, worry, optimism, anger, consensus, tone_delta, source)
+
+def supporter_pulse_model_signal(pulse: SupporterPulse, *, independently_verified: bool, historically_validated: bool) -> EvidenceSignal:
+    """Supporter Pulse får modellpåverkan först efter både oberoende verifiering och historisk validering."""
+    directional=(pulse.confidence+pulse.optimism)-(pulse.resignation+pulse.worry)
+    edge=max(-1.0,min(1.0,directional/2.0))
+    sig=fan_sentiment_signal(
+        relative_sentiment_edge=edge,
+        post_count=pulse.posts,
+        source=pulse.source,
+        explanation=f"Supporter Pulse: {pulse.label}. Konsensus {pulse.consensus:.0%}. Signal är spärrad utan historiskt bevisad marginalnytta.",
+    )
+    verified=bool(independently_verified and historically_validated and pulse.sample_quality >= 0.45 and pulse.consensus >= 0.35)
+    if verified:
+        return sig
+    return EvidenceSignal(**{**sig.__dict__, "is_verified": False})
 
 def analyze_forum_posts(posts: Iterable[ForumPost]) -> ForumRadar:
     rows=list(posts)

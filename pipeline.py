@@ -70,7 +70,7 @@ def run_match_pipeline(match: MatchInput, providers: Sequence[Provider], *, max_
     )
     enriched = MatchInput(
         match.number, match.home, match.away, match.odds, match.public, tuple(card.final_model),
-        kickoff=match.kickoff, competition=match.competition,
+        kickoff=match.kickoff, competition=match.competition, market_available=match.market_available,
     )
     return MatchPipelineResult(match, enriched, card, stages)
 

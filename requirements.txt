@@ -3,3 +3,6 @@ pandas>=2.2
 numpy>=1.26
 pytest>=8.0
 requests>=2.32
+
+# Optional/used when STRECKVERKET_DATABASE_URL points to PostgreSQL/Neon
+psycopg[binary]>=3.2
