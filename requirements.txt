@@ -1,4 +1,5 @@
-streamlit>=1.37
+# Tested runtime for v3.89.1; pin to keep deployments reproducible.
+streamlit==1.64.0
 pandas>=2.2
 numpy>=1.26
 pytest>=8.0
