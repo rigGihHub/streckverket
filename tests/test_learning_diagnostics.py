@@ -49,3 +49,15 @@ def test_invalid_min_sample_rejected():
         pass
     else:
         raise AssertionError("Expected ValueError")
+
+
+
+def test_diagnostics_ignore_match_without_market_baseline():
+    c = _coupon()
+    from dataclasses import replace
+    matches = list(c.matches)
+    matches[0] = replace(matches[0], market_available=False)
+    c = replace(c, matches=tuple(matches))
+    rows = diagnostic_segments([c], min_sample=5)
+    all_row = next(r for r in rows if r.segment == "Alla matcher")
+    assert all_row.matches == 12

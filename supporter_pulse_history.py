@@ -37,6 +37,9 @@ class SupporterPulseSnapshot:
     consensus: float
     tone_delta: float | None
     sample_quality: float
+    independent_origins: int
+    independence_rate: float
+    dominant_origin_share: float
     market_team_win_prob: float
     result: str | None = None
 
@@ -55,6 +58,9 @@ def make_pulse_snapshot(
     pulse: SupporterPulse,
     data_mode: str,
     captured_at: str | None = None,
+    independent_origins: int | None = None,
+    independence_rate: float | None = None,
+    dominant_origin_share: float | None = None,
 ) -> SupporterPulseSnapshot:
     if str(data_mode).strip().lower() == "demo":
         raise ValueError("Demodata får inte sparas i Supporter Pulse-historiken")
@@ -70,7 +76,7 @@ def make_pulse_snapshot(
         raise ValueError("Marknadsbas 1/X/2 krävs för historisk jämförelse")
     win_prob = float(market[0] if side == "home" else market[2])
     return SupporterPulseSnapshot(
-        schema_version=1,
+        schema_version=2,
         coupon_fingerprint=str(coupon_fingerprint),
         match_number=int(match.number),
         home=str(match.home),
@@ -91,6 +97,9 @@ def make_pulse_snapshot(
         consensus=float(pulse.consensus),
         tone_delta=None if pulse.tone_delta is None else float(pulse.tone_delta),
         sample_quality=float(pulse.sample_quality),
+        independent_origins=max(0, int(independent_origins if independent_origins is not None else pulse.posts)),
+        independence_rate=max(0.0, min(1.0, float(independence_rate if independence_rate is not None else 1.0))),
+        dominant_origin_share=max(0.0, min(1.0, float(dominant_origin_share if dominant_origin_share is not None else (1.0 / pulse.posts if pulse.posts else 0.0)))),
         market_team_win_prob=max(0.0, min(1.0, win_prob)),
         result=None,
     )

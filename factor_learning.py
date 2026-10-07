@@ -73,6 +73,8 @@ def factor_observations(coupons: Iterable[object]) -> List[dict]:
         for match in getattr(coupon, "matches", ()):
             if getattr(match, "result", None) not in SIGNS:
                 continue
+            if not bool(getattr(match, "market_available", False)):
+                continue
             final = tuple(getattr(match, "model"))
             for factor in getattr(match, "factors", ()) or ():
                 if not getattr(factor, "verified", False):

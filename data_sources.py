@@ -196,7 +196,12 @@ def parse_svenskaspel_api_payload(payload: Any) -> List[MatchInput]:
         else:
             model = public
             safe_odds = (3.0, 3.0, 3.0)
-        matches.append(MatchInput(i, pair[0], pair[1], safe_odds, public, model, kickoff=_extract_event_kickoff(event), competition=_extract_event_competition(event), market_available=bool(odds)))
+        matches.append(MatchInput(
+            i, pair[0], pair[1], safe_odds, public, model,
+            kickoff=_extract_event_kickoff(event), competition=_extract_event_competition(event),
+            market_available=bool(odds), market_source="Svenska Spel" if odds else "",
+            market_match_confidence=1.0 if odds else None,
+        ))
     return matches
 
 
@@ -324,15 +329,35 @@ def aggregate_1x2_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         n = len(s)
         return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
+    # v3.58: preserve the robust consensus diagnostics instead of discarding them.
+    # The representative odds below remain fair/consensus odds, not an offered price.
+    try:
+        from market_consensus import quotes_from_odds_api_event, robust_market_consensus
+        consensus = robust_market_consensus(quotes_from_odds_api_event(event))
+        consensus_odds = (median(prices["1"]), median(prices["X"]), median(prices["2"]))
+        bookmaker_count = min(len(prices["1"]), len(prices["X"]), len(prices["2"]))
+        dispersion = consensus.dispersion
+        outliers = consensus.outliers
+        method = "robust median fair-probability consensus"
+    except (ValueError, TypeError, KeyError):
+        consensus_odds = (median(prices["1"]), median(prices["X"]), median(prices["2"]))
+        bookmaker_count = min(len(prices["1"]), len(prices["X"]), len(prices["2"]))
+        dispersion = None
+        outliers = ()
+        method = "median bookmaker odds"
+
     return {
         "event_id": event.get("id"),
         "home": home,
         "away": away,
         "commence_time": event.get("commence_time"),
         "sport": event.get("sport_title") or event.get("sport_key"),
-        "odds": (median(prices["1"]), median(prices["X"]), median(prices["2"])),
-        "bookmaker_count": min(len(prices["1"]), len(prices["X"]), len(prices["2"])),
+        "odds": consensus_odds,
+        "bookmaker_count": bookmaker_count,
         "last_update": max(updates) if updates else None,
+        "market_dispersion": dispersion,
+        "market_outliers": tuple(outliers),
+        "market_consensus_method": method,
     }
 
 
@@ -409,6 +434,8 @@ def parse_coupon_csv(df) -> List[MatchInput]:
             public=public,
             model=model,
             market_available=has_odds,
+            market_source="CSV" if has_odds else "",
+            market_match_confidence=1.0 if has_odds else None,
         ))
     if len(out) != 13:
         raise DataSourceError(f"En Stryktipskupong måste innehålla 13 matcher; filen innehåller {len(out)}.")

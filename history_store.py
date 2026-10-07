@@ -16,8 +16,10 @@ import sqlite3
 from typing import Iterable, List, Sequence
 
 from facit import FacitCoupon, dumps_facit, loads_facit
+from market_timeline import MarketPoint, deduplicate_points, dumps_market_points, loads_market_points
+from signal_timeline import SignalPoint, deduplicate_signal_points, loads_signal_points
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 5
 
 
 class HistoryStoreError(RuntimeError):
@@ -32,6 +34,18 @@ class HistoryStore:
         raise NotImplementedError
 
     def load_coupons(self) -> List[FacitCoupon]:
+        raise NotImplementedError
+
+    def save_market_points(self, points: Sequence[MarketPoint]) -> int:
+        raise NotImplementedError
+
+    def load_market_points(self, coupon_key: str | None = None) -> List[MarketPoint]:
+        raise NotImplementedError
+
+    def save_signal_points(self, points: Sequence[SignalPoint]) -> int:
+        raise NotImplementedError
+
+    def load_signal_points(self, coupon_key: str | None = None) -> List[SignalPoint]:
         raise NotImplementedError
 
     def delete_coupon(self, coupon_id: str) -> bool:
@@ -95,6 +109,32 @@ class SQLiteHistoryStore(HistoryStore):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_facit_captured_at ON facit_coupons(captured_at)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_points (
+                    coupon_key TEXT NOT NULL,
+                    match_number INTEGER NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (coupon_key, match_number, captured_at)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_market_points_coupon ON market_points(coupon_key, captured_at)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS signal_points (
+                    identity TEXT PRIMARY KEY,
+                    coupon_key TEXT NOT NULL,
+                    match_number INTEGER NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_points_coupon ON signal_points(coupon_key, captured_at)")
 
     def save_coupon(self, coupon: FacitCoupon) -> None:
         payload = json.dumps(asdict(coupon), ensure_ascii=False, separators=(",", ":"))
@@ -133,6 +173,55 @@ class SQLiteHistoryStore(HistoryStore):
             return []
         raw = "[" + ",".join(row[0] for row in rows) + "]"
         return loads_facit(raw)
+
+    def save_market_points(self, points: Sequence[MarketPoint]) -> int:
+        if not points:
+            return 0
+        existing = self.load_market_points(points[0].coupon_key)
+        accepted = deduplicate_points(existing, points)
+        if not accepted:
+            return 0
+        with self._connect() as conn:
+            for point in accepted:
+                payload = json.dumps(asdict(point), ensure_ascii=False, separators=(",", ":"))
+                conn.execute(
+                    "INSERT OR IGNORE INTO market_points (coupon_key, match_number, captured_at, payload) VALUES (?, ?, ?, ?)",
+                    (point.coupon_key, point.match_number, point.captured_at, payload),
+                )
+        return len(accepted)
+
+    def load_market_points(self, coupon_key: str | None = None) -> List[MarketPoint]:
+        with self._connect() as conn:
+            if coupon_key is None:
+                rows = conn.execute("SELECT payload FROM market_points ORDER BY captured_at ASC, match_number ASC").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT payload FROM market_points WHERE coupon_key = ? ORDER BY captured_at ASC, match_number ASC",
+                    (str(coupon_key),),
+                ).fetchall()
+        if not rows:
+            return []
+        return loads_market_points("[" + ",".join(row[0] for row in rows) + "]")
+
+    def save_signal_points(self, points: Sequence[SignalPoint]) -> int:
+        if not points:
+            return 0
+        existing = self.load_signal_points(points[0].coupon_key)
+        accepted = deduplicate_signal_points(existing, points)
+        with self._connect() as conn:
+            for point in accepted:
+                payload = json.dumps(asdict(point), ensure_ascii=False, separators=(",", ":"))
+                conn.execute("INSERT OR IGNORE INTO signal_points (identity, coupon_key, match_number, captured_at, payload) VALUES (?, ?, ?, ?, ?)",
+                             (point.identity, point.coupon_key, point.match_number, point.captured_at, payload))
+        return len(accepted)
+
+    def load_signal_points(self, coupon_key: str | None = None) -> List[SignalPoint]:
+        with self._connect() as conn:
+            if coupon_key is None:
+                rows = conn.execute("SELECT payload FROM signal_points ORDER BY captured_at ASC, match_number ASC").fetchall()
+            else:
+                rows = conn.execute("SELECT payload FROM signal_points WHERE coupon_key = ? ORDER BY captured_at ASC, match_number ASC", (str(coupon_key),)).fetchall()
+        return loads_signal_points("[" + ",".join(row[0] for row in rows) + "]") if rows else []
 
     def delete_coupon(self, coupon_id: str) -> bool:
         with self._connect() as conn:
@@ -182,6 +271,29 @@ class PostgresHistoryStore(HistoryStore):
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_facit_captured_at ON facit_coupons(captured_at)"
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_points (
+                        coupon_key TEXT NOT NULL,
+                        match_number INTEGER NOT NULL,
+                        captured_at TIMESTAMPTZ NOT NULL,
+                        payload JSONB NOT NULL,
+                        PRIMARY KEY (coupon_key, match_number, captured_at)
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_market_points_coupon ON market_points(coupon_key, captured_at)"
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS signal_points (
+                        identity TEXT PRIMARY KEY, coupon_key TEXT NOT NULL, match_number INTEGER NOT NULL,
+                        captured_at TIMESTAMPTZ NOT NULL, payload JSONB NOT NULL
+                    )
+                    """
+                )
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_points_coupon ON signal_points(coupon_key, captured_at)")
 
     def save_coupon(self, coupon: FacitCoupon) -> None:
         payload = json.dumps(asdict(coupon), ensure_ascii=False)
@@ -220,6 +332,65 @@ class PostgresHistoryStore(HistoryStore):
         if not rows:
             return []
         return loads_facit("[" + ",".join(str(row[0]) for row in rows) + "]")
+
+    def save_market_points(self, points: Sequence[MarketPoint]) -> int:
+        if not points:
+            return 0
+        existing = self.load_market_points(points[0].coupon_key)
+        accepted = deduplicate_points(existing, points)
+        if not accepted:
+            return 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                for point in accepted:
+                    payload = json.dumps(asdict(point), ensure_ascii=False)
+                    cur.execute(
+                        """
+                        INSERT INTO market_points (coupon_key, match_number, captured_at, payload)
+                        VALUES (%s, %s, %s, %s::jsonb)
+                        ON CONFLICT (coupon_key, match_number, captured_at) DO NOTHING
+                        """,
+                        (point.coupon_key, point.match_number, point.captured_at, payload),
+                    )
+        return len(accepted)
+
+    def load_market_points(self, coupon_key: str | None = None) -> List[MarketPoint]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if coupon_key is None:
+                    cur.execute("SELECT payload::text FROM market_points ORDER BY captured_at ASC, match_number ASC")
+                else:
+                    cur.execute(
+                        "SELECT payload::text FROM market_points WHERE coupon_key = %s ORDER BY captured_at ASC, match_number ASC",
+                        (str(coupon_key),),
+                    )
+                rows = cur.fetchall()
+        if not rows:
+            return []
+        return loads_market_points("[" + ",".join(str(row[0]) for row in rows) + "]")
+
+    def save_signal_points(self, points: Sequence[SignalPoint]) -> int:
+        if not points:
+            return 0
+        existing = self.load_signal_points(points[0].coupon_key)
+        accepted = deduplicate_signal_points(existing, points)
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                for point in accepted:
+                    payload = json.dumps(asdict(point), ensure_ascii=False)
+                    cur.execute("INSERT INTO signal_points (identity, coupon_key, match_number, captured_at, payload) VALUES (%s,%s,%s,%s,%s::jsonb) ON CONFLICT(identity) DO NOTHING",
+                                (point.identity, point.coupon_key, point.match_number, point.captured_at, payload))
+        return len(accepted)
+
+    def load_signal_points(self, coupon_key: str | None = None) -> List[SignalPoint]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                if coupon_key is None:
+                    cur.execute("SELECT payload::text FROM signal_points ORDER BY captured_at ASC, match_number ASC")
+                else:
+                    cur.execute("SELECT payload::text FROM signal_points WHERE coupon_key = %s ORDER BY captured_at ASC, match_number ASC", (str(coupon_key),))
+                rows = cur.fetchall()
+        return loads_signal_points("[" + ",".join(str(row[0]) for row in rows) + "]") if rows else []
 
     def delete_coupon(self, coupon_id: str) -> bool:
         with self._connect() as conn:

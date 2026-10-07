@@ -35,6 +35,7 @@ def build_one_click_config(
     odds_sport_keys: Iterable[str] = DEFAULT_ODDS_SPORT_KEYS,
     odds_regions: str = "uk,eu",
     max_competitions: int = 25,
+    force_live_refresh: bool = False,
 ) -> OneClickConfig:
     """Build a normalized one-click config from either secrets or expert UI."""
     cleaned_sports = tuple(str(x).strip() for x in odds_sport_keys if str(x).strip())
@@ -45,6 +46,7 @@ def build_one_click_config(
         odds_sport_keys=cleaned_sports or DEFAULT_ODDS_SPORT_KEYS,
         odds_regions=str(odds_regions).strip() or "uk,eu",
         max_competitions=max(1, int(max_competitions)),
+        force_live_refresh=bool(force_live_refresh),
     )
 
 

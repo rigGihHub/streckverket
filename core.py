@@ -102,6 +102,14 @@ class MatchInput:
     kickoff: str | None = None
     competition: str = ""
     market_available: bool = True
+    market_source: str = ""
+    market_bookmaker_count: int | None = None
+    market_last_update: str | None = None
+    market_match_confidence: float | None = None
+    market_dispersion: float | None = None
+    market_outliers: Tuple[str, ...] = ()
+    market_consensus_method: str = ""
+    public_last_update: str | None = None
 
     @property
     def market(self):

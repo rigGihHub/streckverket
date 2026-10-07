@@ -89,3 +89,14 @@ def test_weight_actions_are_review_only_and_require_large_sample():
     assert "Överväg" in actions[0]["action"] or "Behåll" in actions[0]["action"]
     assert "autom" not in actions[0]["action"].lower()
     assert "ändra" not in factor_lesson(score).lower() or "automatiskt" in factor_lesson(score).lower()
+
+
+
+def test_factor_learning_ignores_match_without_real_market():
+    from dataclasses import replace
+    c = _coupon_with_factor()
+    matches = list(c.matches)
+    matches[0] = replace(matches[0], market_available=False)
+    c = replace(c, matches=tuple(matches))
+    rows = factor_observations([c])
+    assert all(r["match_number"] != matches[0].match_number for r in rows)

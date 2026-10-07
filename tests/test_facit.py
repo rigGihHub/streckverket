@@ -82,3 +82,39 @@ def test_calibration_rows_has_observations():
     rows=calibration_rows([c])
     assert rows
     assert sum(r["antal"] for r in rows)==39
+
+
+
+def test_validation_excludes_completed_match_without_real_market():
+    ms = matches()
+    ms[0].market_available = False
+    c = make_coupon_snapshot(
+        "mixed", ms, [("1",)] * 13, source="test", strategy="MAX 13",
+        budget=128, rows=128, model_coverage=.1,
+    )
+    c = with_results(c, {i: ("1" if i % 3 == 1 else "X" if i % 3 == 2 else "2") for i in range(1, 14)})
+    perf = aggregate_performance([c])
+    assert perf["completed_matches"] == 13
+    assert perf["matches"] == 12
+    assert perf["excluded_missing_market"] == 1
+
+
+def test_calibration_excludes_match_without_real_market():
+    ms = matches()
+    ms[0].market_available = False
+    c = make_coupon_snapshot(
+        "mixed-cal", ms, [("1",)] * 13, source="test", strategy="MAX 13",
+        budget=128, rows=128, model_coverage=.1,
+    )
+    c = with_results(c, {i: ("1" if i % 3 == 1 else "X" if i % 3 == 2 else "2") for i in range(1, 14)})
+    rows = calibration_rows([c])
+    assert sum(r["antal"] for r in rows) == 36
+
+
+def test_old_facit_without_market_provenance_is_conservatively_ineligible():
+    import json
+    payload = json.loads(dumps_facit([snapshot()]))
+    for match in payload[0]["matches"]:
+        match.pop("market_available", None)
+    restored = loads_facit(json.dumps(payload))
+    assert all(m.market_available is False for m in restored[0].matches)

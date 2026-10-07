@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 import json
 import re
 import time
@@ -63,6 +64,9 @@ class PulseCollection:
     filtered_out: int
     relevant_posts: int = 0
     relevance_rate: float = 0.0
+    independent_origins: int = 0
+    independence_rate: float = 0.0
+    dominant_origin_share: float = 0.0
 
     @property
     def available(self) -> bool:
@@ -221,6 +225,73 @@ def filter_relevant_posts(posts: Iterable[ForumPost], *, team: str, opponent: st
     relevant = [p for p in rows if post_relevance_score(p, team=team, opponent=opponent) >= threshold]
     return relevant, len(relevant) / len(rows)
 
+
+@dataclass(frozen=True)
+class SourceIndependence:
+    posts: int
+    independent_origins: int
+    independence_rate: float
+    dominant_origin_share: float
+
+    @property
+    def risk_label(self) -> str:
+        if self.posts < 2:
+            return "För lite underlag"
+        if self.dominant_origin_share >= 0.70:
+            return "Hög beroenderisk"
+        if self.dominant_origin_share >= 0.45:
+            return "Viss beroenderisk"
+        return "God spridning"
+
+
+def _canonical_external_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        host = parts.netloc.lower().removeprefix("www.")
+        if host.endswith("reddit.com") or host in {"redd.it"}:
+            return ""
+        drop = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid"}
+        query = urlencode([(k,v) for k,v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in drop])
+        path = re.sub(r"/{2,}", "/", parts.path).rstrip("/")
+        return urlunsplit((parts.scheme.lower() or "https", host, path, query, ""))
+    except Exception:
+        return ""
+
+
+def _headline_signature(post: ForumPost) -> str:
+    tokens = [x for x in re.findall(r"[a-z0-9]+", _norm(post.title)) if len(x) >= 3]
+    if len(tokens) < 6:
+        return ""
+    stop = {"this","that","with","from","have","will","about","after","before","their","they","team","match","game"}
+    tokens = [x for x in tokens if x not in stop]
+    return " ".join(sorted(set(tokens))[:18]) if len(tokens) >= 5 else ""
+
+
+def assess_source_independence(posts: Iterable[ForumPost]) -> SourceIndependence:
+    rows = list(posts)
+    if not rows:
+        return SourceIndependence(0, 0, 0.0, 0.0)
+    origins: list[str] = []
+    for p in rows:
+        external = _canonical_external_url(getattr(p, "external_url", ""))
+        if external:
+            origins.append("external:" + external)
+            continue
+        signature = _headline_signature(p)
+        if signature:
+            origins.append("headline:" + signature)
+        else:
+            origins.append("post:" + (p.url.strip().lower() or f"author:{p.author.strip().lower()}:{p.created_utc}"))
+    counts: dict[str, int] = {}
+    for origin in origins:
+        counts[origin] = counts.get(origin, 0) + 1
+    independent = len(counts)
+    dominant = max(counts.values()) / len(rows) if rows else 0.0
+    return SourceIndependence(len(rows), independent, independent / len(rows), dominant)
+
 def collect_team_pulse(
     *,
     team: str,
@@ -260,6 +331,7 @@ def collect_team_pulse(
     current_ts = float(now_ts if now_ts is not None else time.time())
     filtered, removed = _filter_time_window(deduped, now_ts=current_ts, max_age_hours=max_age_hours, kickoff_ts=kickoff_ts)
     relevant, relevance_rate = filter_relevant_posts(filtered, team=team, opponent=opponent)
+    independence = assess_source_independence(relevant)
     baseline = baseline_tone(history, team=team, source_name=source.display_name)
     pulse = analyze_supporter_pulse(relevant, baseline_tone=baseline)
     if relevant:
@@ -271,7 +343,7 @@ def collect_team_pulse(
         status = "Supporterkällan kunde inte hämtas"
     else:
         status = "Källan svarade men gav inget färskt underlag"
-    return PulseCollection(team, opponent, source, pulse, tuple(relevant), status, len(queries), removed + (len(filtered) - len(relevant)), len(relevant), relevance_rate)
+    return PulseCollection(team, opponent, source, pulse, tuple(relevant), status, len(queries), removed + (len(filtered) - len(relevant)), len(relevant), relevance_rate, independence.independent_origins, independence.independence_rate, independence.dominant_origin_share)
 
 
 def collection_rows(collections: Iterable[PulseCollection]) -> list[dict]:
@@ -286,6 +358,9 @@ def collection_rows(collections: Iterable[PulseCollection]) -> list[dict]:
             "Ton": c.pulse.label,
             "Underlag": f"{100*c.pulse.sample_quality:.0f}%",
             "Matchrelevans": f"{100*c.relevance_rate:.0f}%",
+            "Oberoende ursprung": c.independent_origins,
+            "Källoberoende": f"{100*c.independence_rate:.0f}%",
+            "Största ursprung": f"{100*c.dominant_origin_share:.0f}%",
             "Konsensus": f"{100*c.pulse.consensus:.0f}%",
             "Tonförändring": "–" if c.pulse.tone_delta is None else f"{c.pulse.tone_delta:+.2f}",
         })

@@ -60,3 +60,28 @@ def test_source_registry_expanded_only_with_explicit_mappings():
     assert ss.sources_for_team("Man Utd", sources)[0].locator == "reddevils"
     assert ss.sources_for_team("Chelsea FC", sources)[0].locator == "chelseafc"
     assert ss.sources_for_team("Unknown Town", sources) == []
+
+
+def test_source_independence_groups_posts_linking_same_external_article():
+    ts = 1_800_000_000.0
+    rows = [
+        ForumPost("Arsenal match worry after injury news", "", ts, 1, 0, "Reddit r/coys", url="https://reddit/a", author="a", external_url="https://news.example/story?id=7&utm_source=reddit"),
+        ForumPost("Concerned about Arsenal after that injury report", "", ts, 1, 0, "Reddit r/coys", url="https://reddit/b", author="b", external_url="https://news.example/story?id=7&utm_medium=social"),
+        ForumPost("Confident we win this match", "", ts, 1, 0, "Reddit r/coys", url="https://reddit/c", author="c"),
+    ]
+    result = ss.assess_source_independence(rows)
+    assert result.posts == 3
+    assert result.independent_origins == 2
+    assert result.independence_rate == 2 / 3
+    assert result.dominant_origin_share == 2 / 3
+
+
+def test_source_independence_does_not_treat_reddit_permalink_as_external_origin():
+    ts = 1_800_000_000.0
+    rows = [
+        ForumPost("Confident we win this match tonight", "", ts, 1, 0, "Reddit r/coys", url="https://reddit/a", author="a", external_url="https://www.reddit.com/r/coys/comments/a"),
+        ForumPost("Worried about the starting lineup today", "", ts, 1, 0, "Reddit r/coys", url="https://reddit/b", author="b", external_url="https://reddit.com/r/coys/comments/b"),
+    ]
+    result = ss.assess_source_independence(rows)
+    assert result.independent_origins == 2
+    assert result.independence_rate == 1.0

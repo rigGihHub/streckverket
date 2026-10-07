@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any, Iterable, Sequence
@@ -17,7 +17,7 @@ from pipeline import ProviderOutput, run_match_pipeline
 from evidence import make_signal
 from match_intelligence import IntelligenceClaim, resolve_claim
 from source_consensus import DEFAULT_SOURCES, Observation
-from api_cache import CachePolicy, CacheStats, cached_call, cache_stats, stats_delta
+from api_cache import CachePolicy, CacheStats, cached_call, cache_stats, stats_delta, clear_cache_policies
 
 
 def _now() -> str:
@@ -104,6 +104,7 @@ class OneClickConfig:
     odds_regions: str = "uk,eu"
     max_competitions: int = 25
     form_matches: int = 12
+    force_live_refresh: bool = False
 
 
 @dataclass
@@ -158,12 +159,16 @@ def _form_provider(home_summary: dict, away_summary: dict):
 
 
 def _absence_provider(payload: dict, fm: FixtureMatch):
+    observed_at = _now()
     absences=parse_api_football_injuries(payload)
     hm=missing_value(absences,fm.home_id); am=missing_value(absences,fm.away_id)
-    signals=build_match_signals(home_missing=hm,away_missing=am,source_absence="API-Football",absence_verified=True)
+    raw_signals=build_match_signals(home_missing=hm,away_missing=am,source_absence="API-Football",absence_verified=True)
+    # Preserve when Streckverket actually observed the provider response. This timestamp is
+    # later reused by Verified Fact Timeline; it is not treated as the provider's publication time.
+    signals=[replace(sig, updated_at=observed_at) for sig in raw_signals]
     observations=[]
     for a in absences:
-        observations.append(Observation("availability", f"{a.team_id}:{a.player}:{a.status}", DEFAULT_SOURCES["api_football"], _now(), confidence=0.78, direct=True))
+        observations.append(Observation("availability", f"{a.team_id}:{a.player}:{a.status}", DEFAULT_SOURCES["api_football"], observed_at, confidence=0.78, direct=True))
     claim=resolve_claim("availability","injury_suspension",observations) if observations else IntelligenceClaim("availability","injury_suspension",(),None)
     def provider(match: MatchInput):
         return ProviderOutput(provider="API-Football", signals=signals, claims=[claim], message=f"{len(absences)} frånvaroposter", quality="Medel")
@@ -172,11 +177,12 @@ def _absence_provider(payload: dict, fm: FixtureMatch):
 
 
 def _lineup_provider(payload: dict):
+    observed_at = _now()
     response=payload.get("response",[]) if isinstance(payload,dict) else []
     # A confirmed lineup is an intelligence/readiness claim here. We do not invent player-value impacts yet.
     obs=[]
     if response:
-        obs.append(Observation("confirmed_lineup","confirmed",DEFAULT_SOURCES["api_football"],_now(),confidence=0.90,direct=True))
+        obs.append(Observation("confirmed_lineup","confirmed",DEFAULT_SOURCES["api_football"],observed_at,confidence=0.90,direct=True))
     claim=resolve_claim("confirmed_lineup","confirmed_lineup",obs) if obs else IntelligenceClaim("confirmed_lineup","confirmed_lineup",(),None)
     def provider(match: MatchInput):
         return ProviderOutput(provider="API-Football lineups", claims=[claim], message="Bekräftad lineup hittad" if response else "Lineup ännu ej tillgänglig", quality="Hög" if response else "Saknas")
@@ -185,6 +191,10 @@ def _lineup_provider(payload: dict):
 
 
 def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None=None, fetch_coupon: bool=True) -> OneClickResult:
+    if config.force_live_refresh:
+        # Explicit "Uppdatera analysen nu" should re-read short-lived market and
+        # team-news layers. Long-lived competition/team metadata remains cached.
+        clear_cache_policies(("odds", "fixtures", "injuries", "lineups"))
     stages=[]
     match_provenance=[]
     stats_before = cache_stats()
@@ -223,7 +233,16 @@ def run_one_click(config: OneClickConfig, *, coupon: Sequence[MatchInput] | None
             for m in current:
                 e=matched.get(m.number)
                 if e:
-                    odds=tuple(e["odds"]); updated.append(MatchInput(m.number,m.home,m.away,odds,m.public,market_probabilities(odds),kickoff=m.kickoff,competition=m.competition))
+                    odds=tuple(e["odds"]); updated.append(MatchInput(
+                        m.number, m.home, m.away, odds, m.public, market_probabilities(odds),
+                        kickoff=m.kickoff, competition=m.competition, market_available=True,
+                        market_source="The Odds API", market_bookmaker_count=int(e.get("bookmaker_count") or 0),
+                        market_last_update=e.get("last_update"), market_match_confidence=1.0,
+                market_dispersion=e.get("market_dispersion"),
+                        market_outliers=tuple(e.get("market_outliers") or ()),
+                        market_consensus_method=str(e.get("market_consensus_method") or ""),
+                        public_last_update=getattr(m, "public_last_update", None),
+                    ))
                 else: updated.append(m)
             current=updated
         stages.append(OneClickStage("The Odds API",status.ok,status.message,len(matched),13))

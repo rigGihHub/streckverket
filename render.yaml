@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: streckverket
+    runtime: docker
+    healthCheckPath: /_stcore/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: STRECKVERKET_DATABASE_URL
+        sync: false

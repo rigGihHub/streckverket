@@ -16,6 +16,83 @@ class CouponReadiness:
     total_matches: int
 
 
+@dataclass(frozen=True)
+class ReadinessGuidance:
+    headline: str
+    message: str
+    next_step: str
+    tone: str
+
+
+def readiness_guidance(
+    readiness: CouponReadiness,
+    *,
+    demo: bool = False,
+    market_missing_count: int = 0,
+) -> ReadinessGuidance:
+    """Turn readiness diagnostics into one concrete novice action.
+
+    This function does not alter readiness or system selection. It only translates
+    existing status/blockers into plain-language next steps.
+    """
+    blockers = tuple(str(x).lower() for x in (readiness.blockers or ()))
+
+    if demo or "demo" in readiness.status.lower():
+        return ReadinessGuidance(
+            headline="HÄMTA RIKTIG KUPONG",
+            message="Du tittar på testdata. Systemet är bara till för att prova appen.",
+            next_step="Hämta den aktuella Stryktipskupongen innan du använder något spelråd.",
+            tone="error",
+        )
+
+    if market_missing_count > 0 or any("marknadsodds" in b for b in blockers):
+        return ReadinessGuidance(
+            headline="SPELA INTE ÄNNU",
+            message=f"Aktuella bookmakerodds saknas för {max(1, int(market_missing_count))} av 13 matcher. Då saknas Streckverkets viktigaste marknadsankare.",
+            next_step="Tryck Analysera kupongen igen. Om odds fortfarande saknas: vänta och försök igen senare.",
+            tone="error",
+        )
+
+    if readiness.status == "SPELKlar".upper():
+        return ReadinessGuidance(
+            headline="SYSTEMET KAN ANVÄNDAS",
+            message="Underlaget är tillräckligt komplett för att Streckverket ska kunna ge sitt aktuella systemförslag.",
+            next_step="Kontrollera de 13 tecknen nedan. Om det är långt kvar till spelstopp kan du analysera igen senare för färskare information.",
+            tone="success",
+        )
+
+    if any("startelv" in b for b in blockers):
+        return ReadinessGuidance(
+            headline="VÄNTA OM DU KAN",
+            message="Startelvsinformationen är inte komplett ännu. Den blir ofta bättre närmare avspark.",
+            next_step="Analysera kupongen igen närmare spelstopp innan du lämnar in systemet.",
+            tone="warning",
+        )
+
+    if any("källkonflikt" in b for b in blockers):
+        return ReadinessGuidance(
+            headline="KONTROLLERA UNDERLAGET",
+            message="Två eller flera källor säger olika saker om någon del av kupongen.",
+            next_step="Analysera igen. Om konflikten finns kvar kan du öppna Expertläge och granska datakällorna innan spel.",
+            tone="warning",
+        )
+
+    if readiness.status == "NÄSTAN SPELKLAR":
+        return ReadinessGuidance(
+            headline="NÄSTAN KLART",
+            message="Systemförslaget går att läsa, men någon viktig information är fortfarande för tunn eller gammal.",
+            next_step="Analysera kupongen igen närmare spelstopp för att försöka fylla luckorna.",
+            tone="warning",
+        )
+
+    return ReadinessGuidance(
+        headline="SPELA INTE ÄNNU",
+        message="För mycket viktig matchinformation saknas eller är ännu inte verifierad.",
+        next_step="Tryck Analysera kupongen igen. Om läget inte förbättras: vänta tills mer information finns.",
+        tone="error",
+    )
+
+
 def sign_meaning(sign: str, home: str = "hemmalaget", away: str = "bortalaget") -> str:
     if sign == "1":
         return f"{home} vinner"

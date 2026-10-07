@@ -7,8 +7,12 @@ from math import log
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 from factor_learning import FactorSnapshot
+from predictive_experiment import ShadowPrediction
+from observation_quality import ObservationQuality, assess_observation_quality, summarize_quality
 
 from core import SIGNS, normalize
+from swap_backtest import SwapProposalSnapshot
+from counterfactual_system_lab import CounterfactualSystemSnapshot
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,15 @@ class FacitMatch:
     factors: Tuple[FactorSnapshot, ...] = ()
     kickoff: str | None = None
     market_available: bool = True
+    market_source: str = ""
+    market_bookmaker_count: int | None = None
+    market_last_update: str | None = None
+    market_match_confidence: float | None = None
+    market_dispersion: float | None = None
+    market_outliers: Tuple[str, ...] = ()
+    market_consensus_method: str = ""
+    public_last_update: str | None = None
+    shadow_predictions: Tuple[ShadowPrediction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -36,6 +49,10 @@ class FacitCoupon:
     rows: int
     model_coverage: float
     matches: Tuple[FacitMatch, ...]
+    model_version: str = ""
+    swap_proposals: Tuple[SwapProposalSnapshot, ...] = ()
+    counterfactual_systems: Tuple[CounterfactualSystemSnapshot, ...] = ()
+    market_timeline_key: str = ""
 
 
 def _as_probs(values: Sequence[float]) -> Tuple[float, float, float]:
@@ -57,6 +74,11 @@ def make_coupon_snapshot(
     model_coverage: float,
     captured_at: str | None = None,
     factor_snapshots: Mapping[int, Sequence[FactorSnapshot]] | None = None,
+    model_version: str = "",
+    swap_proposals: Sequence[SwapProposalSnapshot] = (),
+    counterfactual_systems: Sequence[CounterfactualSystemSnapshot] = (),
+    market_timeline_key: str = "",
+    shadow_predictions: Mapping[int, Sequence[ShadowPrediction]] | None = None,
 ) -> FacitCoupon:
     if len(matches) != 13 or len(selections) != 13:
         raise ValueError("Ett Stryktipsfacit kräver exakt 13 matcher och 13 val")
@@ -76,7 +98,16 @@ def make_coupon_snapshot(
                 selected=chosen,
                 kickoff=getattr(match, "kickoff", None),
                 market_available=bool(getattr(match, "market_available", True)),
+                market_source=str(getattr(match, "market_source", "") or ""),
+                market_bookmaker_count=getattr(match, "market_bookmaker_count", None),
+                market_last_update=getattr(match, "market_last_update", None),
+                market_match_confidence=getattr(match, "market_match_confidence", None),
+                market_dispersion=getattr(match, "market_dispersion", None),
+                market_outliers=tuple(getattr(match, "market_outliers", ()) or ()),
+                market_consensus_method=str(getattr(match, "market_consensus_method", "") or ""),
+                public_last_update=getattr(match, "public_last_update", None),
                 factors=tuple((factor_snapshots or {}).get(int(match.number), ())),
+                shadow_predictions=tuple((shadow_predictions or {}).get(int(match.number), ())),
             )
         )
     return FacitCoupon(
@@ -88,6 +119,9 @@ def make_coupon_snapshot(
         rows=int(rows),
         model_coverage=float(model_coverage),
         matches=tuple(out),
+        model_version=str(model_version or ""),
+        swap_proposals=tuple(swap_proposals), counterfactual_systems=tuple(counterfactual_systems),
+        market_timeline_key=str(market_timeline_key or ""),
     )
 
 
@@ -102,12 +136,19 @@ def with_results(coupon: FacitCoupon, results: Mapping[int, str]) -> FacitCoupon
         updated.append(FacitMatch(
             match_number=match.match_number, home=match.home, away=match.away,
             model=match.model, market=match.market, public=match.public,
-            selected=match.selected, kickoff=match.kickoff, market_available=match.market_available, result=result, factors=match.factors,
+            selected=match.selected, kickoff=match.kickoff, market_available=match.market_available,
+            market_source=match.market_source, market_bookmaker_count=match.market_bookmaker_count,
+            market_last_update=match.market_last_update, market_match_confidence=match.market_match_confidence,
+            market_dispersion=match.market_dispersion, market_outliers=match.market_outliers, market_consensus_method=match.market_consensus_method,
+            public_last_update=match.public_last_update, result=result, factors=match.factors,
+            shadow_predictions=match.shadow_predictions,
         ))
     return FacitCoupon(
         coupon_id=coupon.coupon_id, captured_at=coupon.captured_at, source=coupon.source,
         strategy=coupon.strategy, budget=coupon.budget, rows=coupon.rows,
-        model_coverage=coupon.model_coverage, matches=tuple(updated),
+        model_coverage=coupon.model_coverage, matches=tuple(updated), model_version=coupon.model_version,
+        swap_proposals=coupon.swap_proposals, counterfactual_systems=coupon.counterfactual_systems,
+        market_timeline_key=coupon.market_timeline_key,
     )
 
 
@@ -133,6 +174,52 @@ def _pick(probs: Sequence[float]) -> str:
     return SIGNS[max(range(3), key=lambda i: float(probs[i]))]
 
 
+def observation_quality_for_match(match: FacitMatch, captured_at: str | None) -> ObservationQuality:
+    return assess_observation_quality(
+        market_available=bool(getattr(match, "market_available", False)),
+        captured_at=captured_at, kickoff=getattr(match, "kickoff", None),
+        market_source=getattr(match, "market_source", ""),
+        market_bookmaker_count=getattr(match, "market_bookmaker_count", None),
+        market_last_update=getattr(match, "market_last_update", None),
+        market_match_confidence=getattr(match, "market_match_confidence", None),
+        public_last_update=getattr(match, "public_last_update", None),
+    )
+
+
+def observation_quality_summary(coupons: Iterable[FacitCoupon]) -> Dict[str, object]:
+    qualities = [observation_quality_for_match(m, c.captured_at) for c in coupons for m in c.matches]
+    return summarize_quality(qualities)
+
+
+def is_validation_eligible(match: FacitMatch) -> bool:
+    """True only when the result is known and a real bookmaker baseline was captured.
+
+    Historical model-vs-market learning must never treat fallback/synthetic market
+    probabilities as genuine bookmaker evidence.
+    """
+    return match.result in SIGNS and bool(getattr(match, "market_available", False))
+
+
+def validation_observation_counts(coupons: Iterable[FacitCoupon]) -> Dict[str, int]:
+    completed = 0
+    eligible = 0
+    missing_market = 0
+    for coupon in coupons:
+        for match in coupon.matches:
+            if match.result not in SIGNS:
+                continue
+            completed += 1
+            if is_validation_eligible(match):
+                eligible += 1
+            else:
+                missing_market += 1
+    return {
+        "completed": completed,
+        "eligible": eligible,
+        "excluded_missing_market": missing_market,
+    }
+
+
 def evaluate_coupon(coupon: FacitCoupon) -> Dict[str, object]:
     completed = [m for m in coupon.matches if m.result in SIGNS]
     if not completed:
@@ -143,6 +230,7 @@ def evaluate_coupon(coupon: FacitCoupon) -> Dict[str, object]:
             "thirteen_correct": False,
             "model_pick_hits": 0,
             "market_pick_hits": 0,
+            "market_completed": 0,
             "public_pick_hits": 0,
             "model_brier": None,
             "market_brier": None,
@@ -153,12 +241,13 @@ def evaluate_coupon(coupon: FacitCoupon) -> Dict[str, object]:
 
     system_hits = sum(1 for m in completed if m.result in m.selected)
     model_hits = sum(1 for m in completed if _pick(m.model) == m.result)
-    market_hits = sum(1 for m in completed if _pick(m.market) == m.result)
+    validation = [m for m in completed if is_validation_eligible(m)]
+    market_hits = sum(1 for m in validation if _pick(m.market) == m.result)
     public_hits = sum(1 for m in completed if _pick(m.public) == m.result)
-    model_brier = sum(_brier_one(m.model, m.result) for m in completed) / len(completed)
-    market_brier = sum(_brier_one(m.market, m.result) for m in completed) / len(completed)
-    model_ll = sum(_logloss_one(m.model, m.result) for m in completed) / len(completed)
-    market_ll = sum(_logloss_one(m.market, m.result) for m in completed) / len(completed)
+    model_brier = (sum(_brier_one(m.model, m.result) for m in validation) / len(validation)) if validation else None
+    market_brier = (sum(_brier_one(m.market, m.result) for m in validation) / len(validation)) if validation else None
+    model_ll = (sum(_logloss_one(m.model, m.result) for m in validation) / len(validation)) if validation else None
+    market_ll = (sum(_logloss_one(m.market, m.result) for m in validation) / len(validation)) if validation else None
 
     if len(completed) < len(coupon.matches):
         plain = f"{len(completed)} av {len(coupon.matches)} matcher har fått ett slutresultat. Facitet är därför inte komplett ännu."
@@ -174,6 +263,7 @@ def evaluate_coupon(coupon: FacitCoupon) -> Dict[str, object]:
         "thirteen_correct": len(completed) == 13 and system_hits == 13,
         "model_pick_hits": model_hits,
         "market_pick_hits": market_hits,
+        "market_completed": len(validation),
         "public_pick_hits": public_hits,
         "model_brier": model_brier,
         "market_brier": market_brier,
@@ -190,7 +280,7 @@ def calibration_rows(coupons: Iterable[FacitCoupon], bin_size: float = 0.10) -> 
     sums: Dict[int, float] = {}
     for coupon in coupons:
         for m in coupon.matches:
-            if m.result not in SIGNS:
+            if not is_validation_eligible(m):
                 continue
             for sign, prob in zip(SIGNS, m.model):
                 idx = min(int(float(prob) / bin_size), int(1.0 / bin_size) - 1)
@@ -214,10 +304,15 @@ def calibration_rows(coupons: Iterable[FacitCoupon], bin_size: float = 0.10) -> 
 
 def aggregate_performance(coupons: Sequence[FacitCoupon]) -> Dict[str, object]:
     completed_matches = [m for c in coupons for m in c.matches if m.result in SIGNS]
+    validation_matches = [m for m in completed_matches if is_validation_eligible(m)]
     complete_coupons = [c for c in coupons if all(m.result in SIGNS for m in c.matches)]
-    if not completed_matches:
+    thirteen = sum(bool(evaluate_coupon(c)["thirteen_correct"]) for c in complete_coupons)
+    excluded_missing_market = len(completed_matches) - len(validation_matches)
+    if not validation_matches:
         return {
             "matches": 0,
+            "completed_matches": len(completed_matches),
+            "excluded_missing_market": excluded_missing_market,
             "coupons": len(coupons),
             "complete_coupons": 0,
             "model_pick_accuracy": None,
@@ -227,18 +322,17 @@ def aggregate_performance(coupons: Sequence[FacitCoupon]) -> Dict[str, object]:
             "market_brier": None,
             "model_log_loss": None,
             "market_log_loss": None,
-            "system_13_count": 0,
-            "lesson": "Det behövs färdiga matcher innan Streckverket kan lära sig av facit.",
+            "system_13_count": thirteen,
+            "lesson": "Det behövs färdiga matcher med verifierad bookmakerbas innan Streckverket kan jämföra modellen mot marknaden.",
         }
-    n = len(completed_matches)
-    model_hits = sum(_pick(m.model) == m.result for m in completed_matches)
-    market_hits = sum(_pick(m.market) == m.result for m in completed_matches)
-    public_hits = sum(_pick(m.public) == m.result for m in completed_matches)
-    mb = sum(_brier_one(m.model, m.result) for m in completed_matches) / n
-    kb = sum(_brier_one(m.market, m.result) for m in completed_matches) / n
-    mll = sum(_logloss_one(m.model, m.result) for m in completed_matches) / n
-    kll = sum(_logloss_one(m.market, m.result) for m in completed_matches) / n
-    thirteen = sum(bool(evaluate_coupon(c)["thirteen_correct"]) for c in complete_coupons)
+    n = len(validation_matches)
+    model_hits = sum(_pick(m.model) == m.result for m in validation_matches)
+    market_hits = sum(_pick(m.market) == m.result for m in validation_matches)
+    public_hits = sum(_pick(m.public) == m.result for m in validation_matches)
+    mb = sum(_brier_one(m.model, m.result) for m in validation_matches) / n
+    kb = sum(_brier_one(m.market, m.result) for m in validation_matches) / n
+    mll = sum(_logloss_one(m.model, m.result) for m in validation_matches) / n
+    kll = sum(_logloss_one(m.market, m.result) for m in validation_matches) / n
 
     if n < 100:
         lesson = "Underlaget är fortfarande litet. Streckverket visar resultaten men ska inte ändra modellen aggressivt ännu."
@@ -251,6 +345,8 @@ def aggregate_performance(coupons: Sequence[FacitCoupon]) -> Dict[str, object]:
 
     return {
         "matches": n,
+        "completed_matches": len(completed_matches),
+        "excluded_missing_market": excluded_missing_market,
         "coupons": len(coupons),
         "complete_coupons": len(complete_coupons),
         "model_pick_accuracy": model_hits / n,
@@ -289,14 +385,60 @@ def loads_facit(text: str) -> List[FacitCoupon]:
                 )
                 for f in (m.get("factors") or [])
             )
+            shadow_predictions = tuple(
+                ShadowPrediction(
+                    experiment_id=str(p.get("experiment_id", "")),
+                    label=str(p.get("label", "")),
+                    probabilities=_as_probs(p.get("probabilities", (1/3,1/3,1/3))),
+                    source_model_version=str(p.get("source_model_version", "")),
+                    candidate_rule=str(p.get("candidate_rule", "")),
+                )
+                for p in (m.get("shadow_predictions") or [])
+            )
             matches.append(FacitMatch(
                 match_number=int(m["match_number"]), home=str(m["home"]), away=str(m["away"]),
                 model=_as_probs(m["model"]), market=_as_probs(m["market"]), public=_as_probs(m["public"]),
-                selected=tuple(str(x) for x in m["selected"]), kickoff=m.get("kickoff"), market_available=bool(m.get("market_available", True)), result=m.get("result"), factors=factors,
+                selected=tuple(str(x) for x in m["selected"]), kickoff=m.get("kickoff"),
+                market_available=bool(m.get("market_available", False)),
+                market_source=str(m.get("market_source", "") or ""),
+                market_bookmaker_count=(int(m["market_bookmaker_count"]) if m.get("market_bookmaker_count") is not None else None),
+                market_last_update=m.get("market_last_update"),
+                market_match_confidence=(float(m["market_match_confidence"]) if m.get("market_match_confidence") is not None else None),
+                market_dispersion=(float(m["market_dispersion"]) if m.get("market_dispersion") is not None else None),
+                market_outliers=tuple(str(x) for x in (m.get("market_outliers") or ())),
+                market_consensus_method=str(m.get("market_consensus_method", "") or ""),
+                public_last_update=m.get("public_last_update"), result=m.get("result"), factors=factors,
+                shadow_predictions=shadow_predictions,
             ))
+        swap_proposals = tuple(
+            SwapProposalSnapshot(
+                rank=int(p.get("rank", i + 1)),
+                donor_match_number=int(p["donor_match_number"]),
+                donor_from=tuple(str(x) for x in p["donor_from"]),
+                donor_to=tuple(str(x) for x in p["donor_to"]),
+                recipient_match_number=int(p["recipient_match_number"]),
+                recipient_from=tuple(str(x) for x in p["recipient_from"]),
+                recipient_to=tuple(str(x) for x in p["recipient_to"]),
+                rows=int(p.get("rows", item.get("rows", 0))),
+                predicted_delta_coverage_pp=float(p.get("predicted_delta_coverage_pp", 0.0)),
+                predicted_relative_gain_pct=float(p.get("predicted_relative_gain_pct", 0.0)),
+            )
+            for i, p in enumerate(item.get("swap_proposals", ()) or ())
+        )
+        counterfactual_systems = tuple(
+            CounterfactualSystemSnapshot(
+                label=str(v.get("label", "OKÄNT SYSTEM")), origin=str(v.get("origin", "unknown")),
+                selections=tuple(tuple(str(s) for s in sel) for sel in v.get("selections", ())),
+                rows=int(v.get("rows", 0)), model_coverage=float(v.get("model_coverage", 0.0)),
+                aliases=tuple(str(x) for x in (v.get("aliases", ()) or ())),
+            ) for v in (item.get("counterfactual_systems", ()) or ())
+        )
         coupons.append(FacitCoupon(
             coupon_id=str(item["coupon_id"]), captured_at=str(item["captured_at"]),
             source=str(item["source"]), strategy=str(item["strategy"]), budget=int(item["budget"]),
             rows=int(item["rows"]), model_coverage=float(item["model_coverage"]), matches=tuple(matches),
+            model_version=str(item.get("model_version", "") or ""), swap_proposals=swap_proposals,
+            counterfactual_systems=counterfactual_systems,
+            market_timeline_key=str(item.get("market_timeline_key", "") or ""),
         ))
     return coupons

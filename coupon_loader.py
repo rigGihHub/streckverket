@@ -69,6 +69,13 @@ def merge_external_odds(
                 odds=new_odds,
                 model=market_probabilities(new_odds),
                 market_available=True,
+                market_source="The Odds API",
+                market_bookmaker_count=int(event.get("bookmaker_count") or 0),
+                market_last_update=event.get("last_update"),
+                market_match_confidence=1.0,
+                market_dispersion=event.get("market_dispersion"),
+                market_outliers=tuple(event.get("market_outliers") or ()),
+                market_consensus_method=str(event.get("market_consensus_method") or ""),
             )
         )
     return OddsMergeResult(updated, status, len(matched))

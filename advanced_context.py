@@ -51,6 +51,7 @@ class ForumPost:
     source: str
     url: str = ""
     author: str = ""
+    external_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ def fetch_reddit_subreddit_search(subreddit: str, query: str, *, limit: int = 25
             created_utc=float(d.get("created_utc") or 0), score=int(d.get("score") or 0),
             comments=int(d.get("num_comments") or 0), source=f"Reddit r/{subreddit}",
             url="https://www.reddit.com"+str(d.get("permalink") or ""), author=str(d.get("author") or ""),
+            external_url=str(d.get("url_overridden_by_dest") or d.get("url") or ""),
         ))
     return out
 

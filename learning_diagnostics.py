@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Tuple
 
 from core import SIGNS
-from facit import FacitCoupon, FacitMatch
+from facit import FacitCoupon, FacitMatch, is_validation_eligible
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ def _brier(probs: Sequence[float], result: str) -> float:
 
 
 def _completed(coupons: Iterable[FacitCoupon]) -> List[FacitMatch]:
-    return [m for c in coupons for m in c.matches if m.result in SIGNS]
+    return [m for c in coupons for m in c.matches if is_validation_eligible(m)]
 
 
 def _segment_row(name: str, matches: Sequence[FacitMatch], min_sample: int) -> DiagnosticRow | None:

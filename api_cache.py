@@ -63,6 +63,22 @@ def stats_delta(before: CacheStats, after: CacheStats) -> CacheStats:
     )
 
 
+def clear_cache_policies(names) -> int:
+    """Invalidate selected cache policies without resetting global metrics.
+
+    Used by an explicit user-requested live refresh. Stable metadata caches can
+    remain intact while short-lived odds/fixture/lineup data is fetched again.
+    """
+    selected = {str(name) for name in names}
+    removed = 0
+    with _LOCK:
+        for cache_key in list(_CACHE):
+            if cache_key[0] in selected:
+                _CACHE.pop(cache_key, None)
+                removed += 1
+    return removed
+
+
 def clear_cache() -> None:
     global _NETWORK_CALLS, _CACHE_HITS, _CACHE_MISSES
     with _LOCK:
