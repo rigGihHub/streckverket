@@ -1,2 +1,2 @@
-APP_VERSION = "3.89.0"
-RELEASE_NAME = "Reliable Start"
+APP_VERSION = "3.89.1"
+RELEASE_NAME = "Budget Sync"

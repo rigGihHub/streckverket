@@ -36,7 +36,7 @@ def test_technical_odds_controls_are_expert_only():
     source = Path("app.py").read_text(encoding="utf-8")
     expert_start = source.index('    else:\n        st.caption("Expertläget visar hela analysapparaten.")')
     odds_pos = source.index('with st.expander("Odds & datakällor"', expert_start)
-    expert_budget_pos = source.index('        budget = st.select_slider(', odds_pos)
+    expert_budget_pos = source.index('        budget = render_budget_input(', odds_pos)
     assert expert_start < odds_pos < expert_budget_pos
 
 

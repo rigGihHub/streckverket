@@ -112,13 +112,8 @@ def render_decision_page(matches, locks, configured_secrets):
 
     from first_time_player_ux import strategy_labels, resolve_strategy
 
-    play_budget = st.number_input(
-        "Hur mycket vill du högst spela för?",
-        min_value=1, max_value=100000,
-        value=int(st.session_state.get("decision_budget", 192)),
-        step=1, key="decision_budget",
-        help="Streckverket håller sig inom den här gränsen. Systemet kan ibland kosta lite mindre eftersom radantalet ökar i fasta steg."
-    )
+    from budget_controls import render_budget_input
+    play_budget = render_budget_input("Hur mycket vill du högst spela för?", "decision_budget")
     strategy_label = st.radio(
         "Hur vill du spela?",
         strategy_labels(),

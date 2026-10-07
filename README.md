@@ -1,7 +1,14 @@
-# Streckverket v3.89.0 – Reliable Start
+# Streckverket v3.89.1 – Budget Sync
 
 [Öppna Streckverket i webbläsaren](https://streckverket.streamlit.app/).
 Adressen avser befintlig publicerad app; versionsnumret som visas i appen avgör vilken kod som körs. Om appen har somnat visas en knapp för att väcka den.
+
+## v3.89.1
+
+- Beloppsändringar uppdaterar systemkostnad och systemförslag i alla vyer.
+- Sidopanelen och beslutsvyn använder samma maxbudget, som bevaras när Expertläge ändras.
+- Valfritt helt belopp 1–100 000 kr kan anges. Tryck Enter eller lämna fältet för att uppdatera.
+- Normalvyn skiljer tydligt på maxbudget och faktisk systemkostnad; radantalet ökar i fasta steg.
 
 ## v3.89.0
 

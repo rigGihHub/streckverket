@@ -143,6 +143,8 @@ def _render_csv_import(label, key):
         else:
             st.rerun()
 
+from budget_controls import play_budget, render_budget_input
+
 with st.sidebar:
     st.markdown("### Streckverket")
     expert_mode = st.toggle(
@@ -156,15 +158,14 @@ with st.sidebar:
         # Startskärmen leder användaren när ingen riktig kupong är öppen.
         if st.session_state.data_mode == "Demo":
             st.caption("Ingen riktig kupong är öppen ännu.")
-            budget = 128
+            budget = play_budget()
+            if st.session_state.get("show_demo_preview", False):
+                budget = render_budget_input("Maxbudget (kr)", "sidebar_budget")
             _first_time_strategy = resolve_strategy(strategy_labels()[0])
             strategy = _first_time_strategy.engine_strategy
         else:
             st.caption("Spelinställning")
-            budget = st.select_slider(
-                "Maxbudget", options=[16,32,64,128,256,512,1024,2048], value=128,
-                help="Streckverket bygger ett system som håller sig inom den här gränsen.",
-            )
+            budget = render_budget_input("Maxbudget (kr)", "sidebar_budget")
             _strategy_label = st.radio(
                 "Spelsätt", strategy_labels(), index=0,
                 help="Är du osäker, behåll Streckverkets rekommendation.",
@@ -236,10 +237,7 @@ with st.sidebar:
                     st.rerun()
 
         st.divider()
-        budget = st.select_slider(
-            "Maxbudget", options=[16,32,64,128,256,512,1024,2048], value=128,
-            help="Maximalt antal kronor/rader som systemet får använda.",
-        )
+        budget = render_budget_input("Maxbudget (kr)", "sidebar_budget")
         strategy = st.radio(
             "Systemstrategi", ["MAX 13", "VÄRDE"], horizontal=True,
             help="MAX 13 prioriterar modellens täckning. VÄRDE väger in streckfördelningen mer.",
@@ -378,6 +376,7 @@ else:
         """,
         unsafe_allow_html=True,
     )
+    st.caption(f"Maxbudget: {budget} kr · Systemkostnad: {system['rows']} kr. Radantalet ökar i fasta steg, så systemet kan kosta mindre än maxbudgeten.")
     getattr(st, _guidance.tone if _guidance.tone in {"success","warning","error","info"} else "info")(_guidance.message)
 
     # Timing and data-quality details remain secondary; analysis is a primary action.

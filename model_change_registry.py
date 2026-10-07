@@ -433,6 +433,14 @@ _REGISTRY: dict[str, ModelChange] = {
         hypothesis="Ett fungerande startflöde utan omladdningsloopar eller testdata som uppfattas som riktiga matcher. Ingen prognos- eller strategiändring.",
         predictive_change=False,
     ),
+    "3.89.1": ModelChange(
+        version="3.89.1", parent_version="3.89.0",
+        change_type="UI/BUDGET",
+        components=("shared-budget", "system-summary", "decision-page"),
+        summary="Samlar beloppsfälten i en gemensam budget så systemkostnad och systemflik uppdateras vid ändring i beslutsvyn eller sidopanelen. Budgeten bevaras mellan visningslägen.",
+        hypothesis="Konsekvent systemförslag för valt maxbelopp utan ändring av prognos- eller optimeringslogik.",
+        predictive_change=False,
+    ),
 }
 
 
